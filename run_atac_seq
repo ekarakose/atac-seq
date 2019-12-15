@@ -1,0 +1,121 @@
+#!/bin/bash
+
+set -o errexit
+
+function run_bowtie2
+{
+    module load bowtie2/2.2.8
+
+    bowtie2\
+        -p 12\
+        -x /sc/orga/projects/AndyIslet/Esra/bowtie2_indices/hg19/hg19\
+        -1 "$source_dir/${fastq_name}_R1_001.fastq"\
+        -2 "$source_dir/${fastq_name}_R2_001.fastq"\
+        -S "$output_dir/${fastq_name}.sam"\
+        -q -X 2000
+}
+
+function keep_chr_only
+{
+    grep -v 'chrM' "$output_dir/${fastq_name}.sam" | grep 'chr'\
+        > "$output_dir/${fastq_name}_chr.sam"
+}
+
+function sort_sam
+{
+    module load samtools/1.3
+
+    samtools view --threads 12 -o "$output_dir/${fastq_name}_chr_q30.bam" -bS -q 30\
+        "$output_dir/${fastq_name}_chr.sam"
+
+    samtools sort --threads 12 -o "$output_dir/${fastq_name}_chr_q30_sorted.bam"\
+        "$output_dir/${fastq_name}_chr_q30.bam"
+}
+
+function remove_duplicates
+{
+    module load picard/2.2.4
+
+    java -jar $PICARD MarkDuplicates\
+        I="$output_dir/${fastq_name}_chr_q30_sorted.bam"\
+        O="$output_dir/${fastq_name}_chr_q30_sorted_nodup.bam"\
+        M="$output_dir/${fastq_name}_chr_q30_sorted_nodup.log"\
+        REMOVE_DUPLICATES=true
+}
+
+function index_bam
+{
+    module load samtools/1.3
+
+    samtools sort --threads 12 -o "$output_dir/${fastq_name}_chr_q30_sorted_nodup_final.bam"\
+        "$output_dir/${fastq_name}_chr_q30_sorted_nodup.bam"
+
+    samtools index -b "$output_dir/${fastq_name}_chr_q30_sorted_nodup_final.bam"
+}
+
+function generate_bigwig
+{
+    module load python py_packages
+
+#bamCoverage -bl /sc/orga/projects/bernse03a/dan-www/blacklist-aug18-merge.bed\
+    bamCoverage\
+        --outFileFormat=bigwig --binSize=1 --skipNonCoveredRegions --numberOfProcessors=12 --normalizeUsing RPKM\
+        -b "$output_dir/${fastq_name}_chr_q30_sorted_nodup_final.bam"\
+        -o "$output_dir/${fastq_name}_chr_q30_sorted_nodup_final.bw"
+}
+
+function call_peak
+{
+    module load macs/2.1.0
+
+    macs2 callpeak\
+        --nomodel\
+        --treatment "$output_dir/${fastq_name}_chr_q30_sorted_nodup_final.bam"\
+        --outdir "$output_dir"\
+        -n "${fastq_name}_chr_q30_sorted_nodup_final"\
+        -nolambda --keep-dup all --slocal 10000
+
+    awk '{print $1,$2,$3,$4}' "$output_dir/olambda_peaks.narrowPeak" > "$output_dir/olambda_peaks_temp.bed"
+
+    cat <(echo "track name=\"${fastq_name}\" description=\"${fastq_name}\"") "$output_dir/olambda_peaks_temp.bed" > "$output_dir/olambda_peaks.bed"
+
+    rm "$output_dir/olambda_peaks_temp.bed"
+}
+
+function set_www_link
+{
+    ln -s "$output_dir" "$HOME/www/$fastq_name"
+}
+
+function exec_atac_seq_steps
+{
+    echo "PROCESSING: $fastq_name"
+
+    echo '[1/8] Run bowtie2';           run_bowtie2       &>> "$output_dir/log.txt"
+    echo '[2/8] Keep chromosomes only'; keep_chr_only     &>> "$output_dir/log.txt"
+    echo '[3/8] Sort SAM';              sort_sam          &>> "$output_dir/log.txt"
+    echo '[4/8] Remove duplicates';     remove_duplicates &>> "$output_dir/log.txt"
+    echo '[5/8] Index BAM';             index_bam         &>> "$output_dir/log.txt"
+    echo '[6/8] Generate bigwig';       generate_bigwig   &>> "$output_dir/log.txt"
+    echo '[7/8] Call peak';             call_peak         &>> "$output_dir/log.txt"
+    echo '[8/9] Set www link';          set_www_link      &>> "$output_dir/log.txt"
+
+    echo "COMPLETED: Visit https://$(whoami).u.hpc.mssm.edu/$fastq_name"
+}
+
+function run_atac_seq
+{
+    local fastq_file=$(basename "$1")
+    local fastq_name=${fastq_file%_R[12]*}
+
+    local source_dir=$(cd "$(dirname "$1")" && pwd)
+    local output_dir=$source_dir/output/$fastq_name
+
+    mkdir -p "$output_dir"
+
+    exec_atac_seq_steps
+}
+
+for fastq_file; do
+    run_atac_seq "$fastq_file"
+done
